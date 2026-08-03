@@ -1,0 +1,20 @@
+# Build output
+*.o
+*.a
+*.exe
+*.dll
+glx_encode
+glx_decode
+
+# Audio scratch
+*.pcm
+*.wav
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+
+# OS / editor
+.DS_Store
+Thumbs.db

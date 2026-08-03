@@ -1,0 +1,132 @@
+Encoder:
+
+PCM input (48kHz) -> Anti-aliasing Filter -> Decimate (48kHz -> 16kHz)
+-> Compression -> Apply headroom -> Generate dither -> Add dither -> Quantizer
+First-order residual -> Static Huffman encoder -> Bitstream
+-> ComputeChecksum -> write header (params + CRC-32) + Bitstream
+
+Decoder:
+
+Read header -> VerifyChecksum (reject if mismatch) -> Bitstream
+-> Huffman decoder -> reconstuct code -> Dequantize
+Generate dither -> Subtract dither -> PCM output (16kHz)
+
+function AntiAliasFilter(x[])
+    for each output index n
+        acc <- 0
+        for each tap k
+            acc <- acc + TAPS[k] x x[n - k]
+        filtered[n] <- acc
+    return filtered
+
+function Decimate(filtered[], factor)
+    for i = 0 to len(filtered)/factor - 1
+        out[i] <- filtered[i x factor]
+    return out
+
+function Compression(x)
+    if x < 0 then
+        sign <- -1
+        x <- |x|
+    else
+        sign <- +1
+    end
+    index <- x >> 8
+    fraction <- x AND 0xFF
+    y0 <- LUT[index]
+    y1 <- LUT[index + 1]
+    y <- y0 + ((y1 - y0) x fraction >> 8)
+    return sign x y
+
+function ApplyHeadroom(x, Delta)
+    h <- 1 / (1 + Delta)
+    return x x h
+
+function LFSR()
+    static state <- seed
+    bit <- state AND 1
+    state <- (state >> 1) XOR (-bit AND POLYNOMIAL)
+    return state
+
+function Dither(alpha)
+    r <- LFSR()
+    if r > alpha then
+        return 0
+    end
+    u <- upper 16 bits of LFSR()
+    g <- u - 32768
+    return (alpha x g) >> 16
+
+function AddDither()
+    for each input sample
+        v <- Dither(alpha)
+        x <- x + v
+
+function Quantize(x, bits)
+    x_unsigned <- x + 32768
+    code <- x_unsigned >> (16 - bits)
+    return code
+
+function ComputeResidual()   
+    previous <- 0
+    for each quantizer code
+        residual <- code - previous
+        previous <- code
+        return residual
+
+function HuffmanEncoder()
+    for each residual
+        index <- residual + OFFSET
+        codeword <- HuffmanLUT[index]
+        write codeword to bitstream
+
+function HuffmanDencoder()   
+    while bitstream not empty
+        residual <- DecodeNextSymbol()
+        output residual
+
+function ReconstructCode()
+    previous <- 0
+    for each residual
+        code <- residual + previous
+        previous <- code
+        output code
+
+function Dequantize(code, bits)
+    step <- 1 << (16 - bits)
+    x <- -32768 + code x step + step / 2
+    return x
+
+function SubtractDither()
+    for each reconstructed sample
+        v <- Dither(alpha)
+        x <- x - v
+
+function BuildCRC32Table()
+    for i = 0 to 255
+        c <- i
+        for k = 0 to 7
+            if c AND 1 then
+                c <- POLY XOR (c >> 1)
+            else
+                c <- c >> 1
+            end
+        end
+        TABLE[i] <- c
+    return TABLE
+
+function CRC32(data[], length)
+    crc <- 0xFFFFFFFF
+    for i = 0 to length - 1
+        crc <- TABLE[(crc XOR data[i]) AND 0xFF] XOR (crc >> 8)
+    return crc XOR 0xFFFFFFFF
+
+function ComputeChecksum(header, payload)
+    covered <- header.numSamples .. header.seed  ++  payload
+    return CRC32(covered, length(covered))
+
+function VerifyChecksum(header, payload)
+    expected <- ComputeChecksum(header, payload)
+    if expected != header.crc32 then
+        reject file as corrupt
+    end
