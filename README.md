@@ -55,9 +55,9 @@ To avoid computational overhead during decimation from a 48 kHz input, we simply
 
 Our compression relies on a $\mu$-law inspired continuous remapping function, where $\mu \ge 0$ controls the compression degree:
 
-$$F(x) = \operatorname{sgn}(x)\,rac{\ln\!\left(1 + \mu|x|
-ight)}{\ln\!\left(1 + \mu
-ight)}, \qquad |x| \le 1$$
+```math
+F(x) = \mathrm{sgn}(x)\,\frac{\ln\left(1 + \mu|x|\right)}{\ln\left(1 + \mu\right)}, \qquad |x| \le 1
+```
 
 Directly evaluating this requires natural logarithms and division, completely violating our integer-only constraint. Conversely, a full direct-mapping Look-Up Table (LUT) for 16-bit PCM would require storing a massive $2^{16}$ entries.
 
@@ -69,13 +69,18 @@ We generate subtractive dither using a 32-bit Galois Linear Feedback Shift Regis
 
 The shared state seed is transmitted in the `.glx` header, allowing perfect noise reconstruction at the decoder. By drawing twice per sample, we ensure up to 37 hours of non-repeating dither.
 
-To prevent quantizer overload, we prescale each companded sample by $h = rac{1}{1 + \Delta}$. This shrinks the signal so the combined signal and dither stay safely within the int16 range without clipping.
+To prevent quantizer overload, we prescale each companded sample by $h = \frac{1}{1 + \Delta}$. This shrinks the signal so the combined signal and dither stay safely within the int16 range without clipping.
 
 ## Coding
 
 We encode the first-order residual, $r_n$, which exhibits a Laplace-like distribution:
 
-$$r_n =  egin{cases} y_n &  n = 1 \ y_n - y_{n-1}  & 	ext{otherwise} \end{cases}$$
+```math
+r_n = \begin{cases}
+  y_n & n = 1 \\
+  y_n - y_{n-1} & \text{otherwise}
+\end{cases}
+```
 
 We specifically chose Huffman coding over advanced table-based coders like Asymmetric Numeral Systems (tANS). While tANS offers superior theoretical compression, Huffman coding provides a far better balance of low implementation complexity and linear execution time. 
 
