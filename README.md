@@ -1,6 +1,6 @@
 # GLX
 
-A minimal, integer-only, per-sample speech codec built for the low-bit ASR evaluation.
+A minimal, integer-only, per-sample speech codec built for low-bit ASR evaluation.
 
 ## Build
 
@@ -10,13 +10,8 @@ make tables     # generate look-up tables such as compression_lut.h, resample_ta
 make clean
 ```
 
-The C binaries are libm-free (`-O2 -Wall -Wextra -std=c11`). Only the Python table generators use
-`math`, and every generated header is checked in, so a plain `make` never needs Python.
-
-`make tables` regenerates them. Note that `huffman_tables_10.csv` — the residual PMF data that
-`gen_huffman_lut.py` reads — is **not** included in this repository, so `huffman_lut.h` cannot be
-regenerated here. The checked-in header is complete and self-contained; only regeneration and the
-bitrate table below depend on the CSV.
+The C binaries  `-O2 -Wall -Wextra -std=c11`, generating both the encoder and decoder for current testing purposes. 
+`make tables` regenerates header files from simulated data in case of errors. 
 
 ## Usage
 
@@ -25,10 +20,7 @@ bitrate table below depend on the CSV.
 ./glx_decode in.glx out.pcm
 ```
 
-`in_rate` is optional: `48000` (default — anti-alias filter then decimate to 16 kHz) or `16000`
-(input is already at the codec rate, resampler bypassed entirely). The bypass matters for
-measurement: feeding already-16 kHz audio through the 48 kHz path requires upsampling it first,
-and that round trip band-limits the signal and understates the true bitrate.
+`in_rate` is optional: `48000` by default
 
 ## Pipeline
 
@@ -45,19 +37,19 @@ The dither is **subtractive**: the encoder adds a pseudo-random value, the decod
 the identical value from the shared seed and subtracts it. Both sides run the same xorshift32
 generator in lockstep, so it cancels exactly in the round trip.
 
-The reference pipeline is written out as below. 
+The reference pipeline is written out below. 
 
 # GLX Codec Implementation Design
 
-The GLX codec is strictly implemented using fixed-point arithmetic. This deliberate design eliminates the need for Floating Point Operations (FLOPs) and dedicated hardware. The two priorities throughout were **minimizing bitrate and minimizing compute**.
+The GLX codec is strictly implemented using fixed-point arithmetic. This deliberate design eliminates the need for Floating Point Operations (FLOPs) and dedicated hardware. The two priorities throughout were **minimizing bitrate and compute**.
 
 We support 1-, 2-, and 3-bit quantization to meet strict low-resolution constraints. The pipeline consists of five stages: Sampling, Logarithmic Compression, Dither, Coding, and Formatting.
 
-**Why 3 bits is the design centre.** The depth was chosen partly for the compute restrictions, but
+**Why 3 bits** The depth was chosen partly for the compute restrictions, but
 mainly to hold bitrate and transmission cost down. It is bounded on both sides: below this range,
 parametric coding begins to overtake waveform coding in efficacy, which removes the whole point of
 a waveform codec; above it, the bitrate savings that motivate the design stop justifying the
-distortion budget. 3-bit quantization would normally introduce harsh, signal-dependent distortion —
+distortion budget. 3-bit quantization normally introduces harsh, signal-dependent distortion, but it is alleviated by
 subtractive dither is what makes it usable.
 
 ## Sampling
@@ -70,59 +62,38 @@ To avoid computational overhead during decimation from a 48 kHz input, we simply
 
 µ-law companding remains one of the most effective methods for redistributing the
 Signal-to-Quantization-Noise Ratio (SQNR) in speech applications (Smith, 1957). We adopt the
-$\mu = 255$ law of **ITU-T G.711** (ITU-T, 1988) — the same companding law used by the narrowband
-telephony codecs GLX is benchmarked against — a continuous remapping function where $\mu \ge 0$
+$\mu = 255$ law of **ITU-T G.711** (ITU-T, 1988) as a continuous remapping function where $\mu \ge 0$
 controls the compression degree:
 
 ```math
 F(x) = \mathrm{sgn}(x)\,\frac{\ln\left(1 + \mu|x|\right)}{\ln\left(1 + \mu\right)}, \qquad |x| \le 1
 ```
 
-Directly evaluating this requires natural logarithms and division, completely violating our integer-only constraint. Conversely, a full direct-mapping Look-Up Table (LUT) for 16-bit PCM would require storing a massive $2^{16}$ entries.
-
-Instead, we chose to approximate the function by storing only 129 values spaced by 256, alongside a sign bit. This crucial design decision drastically reduces our memory footprint while requiring only a few multiply-accumulate (MAC) operations at runtime.
+Directly evaluating this requires natural logarithms and division, completely violating our integer-only constraint. Conversely, a full direct-mapping Look-Up Table (LUT) for 16-bit PCM would require storing a massive $2^{16}$ entries. Instead, we chose to approximate the function by storing only 129 values spaced by 256, alongside a sign bit. This drastically reduces our memory footprint while requiring only a few multiply-accumulate (MAC) operations at runtime.
 
 ## Dither
 
-We generate subtractive dither using a 32-bit **xorshift32** generator (shift triple 13/17/5). It is highly efficient — three shifts and three XORs per value, no table, no multiply, no float. Dither theory assumes perfectly random noise; a deterministic generator is widely accepted in practice given the difficulty of obtaining true randomness (Pamarti, 2007), and subtractive dither *requires* a generator the decoder can replay exactly, which a true random source cannot provide.
-
-Xorshift32 has a full period of $2^{32}-1$ over the nonzero states — the same as a maximal LFSR — with 0 as a fixed point, hence the nonzero-seed requirement. The shared state seed is transmitted in the `.glx` header, allowing perfect noise reconstruction at the decoder. Two draws are taken per sample, giving up to 37 hours of non-repeating dither.
-
-### Why xorshift32 and not an LFSR
-
-This originally used a Galois LFSR, and the change was a correctness fix rather than an
-optimization.
-
-An LFSR advances **one bit per step**, so consecutive states share 31 of their 32 bits. The dither
-needs two draws per sample — one for the gate, one for the amplitude — and taking them from
-consecutive LFSR states made the amplitude a near-deterministic function of the gate draw.
-Conditioning on "the gate fired" then meant conditioning on a *small* gate draw, which dragged the
-amplitude draw small as well. The measured mean amplitude among firing draws was about **−8000 out
-of a ±32768 range at α = 0.5** — a systematically one-sided dither, which destroys the zero-mean
-property the whole subtractive scheme depends on.
-
-Xorshift32 mixes the entire word every step, so the two draws are usable as independent.
+We generate subtractive dither using a 32-bit **xorshift32** generator (shift triple 13/17/5). It is highly efficient, requiring only three shifts and three XORs per value, no table, no multiply, no float. Dither theory assumes perfectly random noise; a deterministic generator is widely accepted in practice given the difficulty of obtaining true randomness (Pamarti, 2007), and subtractive dither *requires* a generator the decoder can replay exactly, which a true random source cannot provide. Xorshift32 has a full period of $2^{32}-1$ over the nonzero states — the same as a maximal LFSR — with 0 as a fixed point, hence the nonzero-seed requirement. The shared state seed is transmitted in the `.glx` header, allowing perfect noise reconstruction at the decoder. Two draws are taken per sample, giving up to 37 hours of non-repeating dither.
 
 To prevent quantizer overload, we prescale each companded sample by $h = \frac{1}{1 + \Delta}$, where $\Delta = \text{step}/2^{15}$ is the quantizer step normalized to full scale. This shrinks the signal so the combined signal and dither stay safely within the int16 range without clipping.
 
 ### Why the decoder does not expand
 
-Neither the headroom factor nor the µ-law compression is inverted at the decoder. This is
-deliberate, not an omission.
+Neither the headroom factor nor the µ-law compression is inverted at the decoder. This is a 
+deliberate decision to preserve the dither statistics.
 
-The requirement at this stage is **error statistics, not perceptual transparency**. The headroom is
-a constant gain, so undoing it buys nothing and costs compute. µ-law, however, is a *non-linear*
+The requirement at this stage is **error statistics, not perceptual transparency**. µ-law is a *non-linear*
 process: expanding it would destroy the statistical properties of the dithered signal. Keeping the
-signal in the companded domain preserves the assumption of uniform quantization error $\epsilon$
-that subtractive dither theory depends on — inverting the companding would violate it.
+signal in the companded domain preserves the assumption of the uniform quantization error $\epsilon$
+subtractive dither theory depends on.
 
 The practical consequence is that decoder output is the companded-domain signal, so it is not
 directly comparable to the input waveform and SNR against the source is meaningless without
-applying an expand externally. That is a property of the design, not a defect in it.
+applying an expand externally.
 
 ## Coding
 
-Successive speech samples remain highly correlated — first-order intersample correlation ≈ 0.9 —
+Successive speech samples remain highly correlated — first-order intersample correlation ≈ 0.9
 so coding the residual is a cheap transform that reduces the signal's dynamic range and increases
 compressibility (Hasegawa-Johnson, 2003). We encode the first-order residual, $r_n$, which exhibits
 a Laplace-like distribution:
@@ -147,10 +118,7 @@ The `.glx` format encapsulates the data in an uninterrupted Huffman code stream.
 
 We explicitly restricted the CRC to the header rather than applying it to the payload. This ensures critical decoding metadata is received correctly while aggressively minimizing the overall transmission bitrate.
 
-## Parametric dither: the design's central trade-off
-
-α is not a tuning nicety — it is the parameter the codec exists to explore.
-
+## Parametric dither
 Standard dithering whitens the noise, which decorrelates the signal but *reduces* the effectiveness
 of compression. By parameterizing the amplitude and shape of the dither, the encoder can be tuned
 between two competing goals: enough signal decorrelation to maintain ASR performance, and low
