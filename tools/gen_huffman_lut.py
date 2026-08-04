@@ -40,8 +40,10 @@ import csv
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-CSV_PATH = os.path.join(HERE, "huffman_tables_10.csv")
-OUT_PATH = os.path.join(HERE, "huffman_lut.h")
+# Generated headers live in src/generated/, one level up from tools/.
+OUT_DIR = os.path.join(HERE, os.pardir, "src", "generated")
+CSV_PATH = os.path.join(HERE, "huffman_tables_10.csv")   # data sits beside this script
+OUT_PATH = os.path.join(OUT_DIR, "huffman_lut.h")
 
 CANONICAL_ALPHA = 0.5   # midpoint; any alpha's table would do, see note above
 BITS_RANGE = [1, 2, 3]

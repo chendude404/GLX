@@ -79,8 +79,9 @@ def test_struct_matches_header(cc, tmp_path):
         '  return 0;}\n', encoding="utf-8")
 
     exe = tmp_path / "probe.exe"
-    subprocess.run([cc, "-std=c11", "-I", str(glxlib.GLX_DIR), "-o", str(exe),
-                    str(src)], check=True, capture_output=True)
+    subprocess.run([cc, "-std=c11",
+                    "-I", str(glxlib.SRC_DIR), "-I", str(glxlib.GEN_DIR),
+                    "-o", str(exe), str(src)], check=True, capture_output=True)
     c = json.loads(subprocess.run([str(exe)], check=True,
                                   capture_output=True, text=True).stdout)
 

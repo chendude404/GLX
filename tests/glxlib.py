@@ -12,10 +12,20 @@ import pathlib
 import re
 
 GLX_DIR = pathlib.Path(__file__).resolve().parent.parent
+SRC_DIR = GLX_DIR / "src"
+GEN_DIR = SRC_DIR / "generated"
+
+#: where headers may live: hand-written sources, then generated tables.
+_SEARCH_PATH = (SRC_DIR, GEN_DIR, GLX_DIR)
 
 
 def _read(name):
-    return (GLX_DIR / name).read_text(encoding="utf-8", errors="replace")
+    for d in _SEARCH_PATH:
+        p = d / name
+        if p.is_file():
+            return p.read_text(encoding="utf-8", errors="replace")
+    raise FileNotFoundError(
+        "%s not found in %s" % (name, ", ".join(str(d) for d in _SEARCH_PATH)))
 
 
 #: decimal or hex C integer literal, with any u/U/l/L suffix left off the capture

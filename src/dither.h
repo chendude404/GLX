@@ -18,7 +18,7 @@
 /* Holds the single 32-bit generator word (the pseudocode's `static state`). */
 typedef struct {
     uint32_t state;   /* must stay nonzero -- 0 is a fixed point of xorshift32 */
-} GlxDitherState;
+} GlxDitherState; //why is it wrapped in a struct but not a uint32
 
 /* Seed the generator. A zero seed is coerced to the default so the state never
  * gets stuck at 0. */

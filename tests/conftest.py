@@ -17,15 +17,16 @@ import sys
 import pytest
 
 GLX_DIR = pathlib.Path(__file__).resolve().parent.parent
+SRC_DIR = GLX_DIR / "src"
+GEN_DIR = SRC_DIR / "generated"
 BUILD_DIR = pathlib.Path(__file__).resolve().parent / "_build"
 
 # Every pipeline stage; encoder.c/decoder.c are excluded because they carry main().
-COMPONENTS = [
-    "resample.c", "compression.c", "dither.c", "quantizer.c",
-    "residual.c", "bitstream.c", "huffman.c", "crc.c",
-]
+MAINS = {"encoder.c", "decoder.c"}
+COMPONENTS = sorted(p.name for p in SRC_DIR.glob("*.c") if p.name not in MAINS)
 
-CFLAGS = ["-O2", "-Wall", "-Wextra", "-std=c11"]
+CFLAGS = ["-O2", "-Wall", "-Wextra", "-std=c11",
+          "-I%s" % SRC_DIR, "-I%s" % GEN_DIR]
 
 
 def _find_cc():
@@ -77,7 +78,7 @@ def shared_lib(cc):
     else:
         # keep the DLL loadable by a stock CPython that has no MSYS libs on PATH
         cmd += ["-static-libgcc"]
-    cmd += ["-o", str(out)] + [str(GLX_DIR / c) for c in COMPONENTS]
+    cmd += ["-o", str(out)] + [str(SRC_DIR / c) for c in COMPONENTS]
 
     _run(cmd)
     return out
@@ -97,8 +98,8 @@ def cli(cc):
     paths = []
     for main_src, exe_name in (("encoder.c", "glx_encode"), ("decoder.c", "glx_decode")):
         out = BUILD_DIR / _exe(exe_name)
-        cmd = ([cc] + CFLAGS + ["-o", str(out), str(GLX_DIR / main_src)]
-               + [str(GLX_DIR / c) for c in COMPONENTS])
+        cmd = ([cc] + CFLAGS + ["-o", str(out), str(SRC_DIR / main_src)]
+               + [str(SRC_DIR / c) for c in COMPONENTS])
         _run(cmd)
         paths.append(out)
     return tuple(paths)

@@ -25,7 +25,9 @@
 import os
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-OUT_PATH = os.path.join(HERE, "crc_lut.h")
+# Generated headers live in src/generated/, one level up from tools/.
+OUT_DIR = os.path.join(HERE, os.pardir, "src", "generated")
+OUT_PATH = os.path.join(OUT_DIR, "crc_lut.h")
 
 POLY = 0xEDB88320  # reflected CRC-32 (ISO-HDLC / zlib), matches crc.c
 NIBBLE_BITS = 4

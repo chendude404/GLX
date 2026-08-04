@@ -15,46 +15,8 @@
 
 /*
  * encoder.c -- GLX encoder entry point.
- *
- * Usage: ./glx_encode in.pcm bits alpha_idx seed out.glx [in_rate]
- *   in.pcm     raw signed 16-bit little-endian mono PCM, 48 kHz (GLX_IN_RATE)
- *   bits       quantizer depth, 1..3
- *   alpha_idx  dither amplitude index 0..10 -> alpha 0.0..1.0 in steps of 0.1
- *   seed       dither LFSR seed (nonzero)
- *   out.glx    output container (16 kHz internally, per GLX_OUT_RATE)
- *   in_rate    optional: 48000 (default) or 16000 (resampler bypassed)
- *
- * Per sample (exactly the encoder pipeline in pseudocode.txt):
- *   PCM (48kHz) -> anti-alias filter -> decimate to 16kHz
- *   -> compress -> add dither -> quantize -> first-order residual -> Huffman
- *
  * PACKETIZED: the file is processed one 10 ms packet at a time -- 480 samples
- * in at 48 kHz, 160 out at 16 kHz -- through fixed stack buffers. Nothing is
- * malloc'd and nothing scales with file length: peak memory is a couple of KB
- * whether the input is one second or three hours. That is what lets this run on
- * the RISC-V target the rest of the codec is written for, and it is the
- * stepping stone to real-time encoding. It replaces a whole-file pass that
- * allocated ~1.33x the input size up front.
- *
- * Every stage was already streaming-capable -- the resampler ring, the dither
- * generator, the `prev` predictor and the bit writer all carry state across
- * packets -- so the emitted byte stream is identical to the old whole-file
- * pass. Two details make that work:
- *
- *   - numSamples is known BEFORE encoding: the resampler emits exactly one
- *     sample per GLX_DECIMATION inputs, so the count is numinputs/3 without
- *     doing the work. That lets the CRC be seeded with the header fields up
- *     front and then fed payload bytes as they are produced, matching
- *     glx_container_crc()'s header-then-payload order without ever holding the
- *     payload in memory.
- *
- *   - the bit writer is drained between packets by writing out w.pos bytes and
- *     resetting w.pos to 0. Its pending partial byte lives in bitbuf/bitcount,
- *     NOT in the buffer, so this is seamless -- but it is exactly why
- *     glx_bitwriter_flush() must be called once at the very end and never per
- *     packet. Flushing zero-pads the partial byte, which at a packet boundary
- *     would inject padding bits into the middle of the stream and desynchronise
- *     every subsequent Huffman codeword.
+ * in at 48 kHz, 160 out at 16 kHz.
  *
  * NOTE the packets are an I/O granularity, not a container-level frame: the
  * predictor and dither chain straight across the boundaries, so a packet is not
@@ -71,7 +33,7 @@ _Static_assert(GLX_PACKET_IN == GLX_PACKET_OUT * GLX_DECIMATION,
 /* Worst case payload for one packet: the longest codeword is 14 bits, so with
  * up to 7 bits already pending a single put() completes at most 2 bytes. */
 #define GLX_PACKET_MAX_BYTES (GLX_PACKET_OUT * 2)
-#define GLX_PAYLOAD_BUF      512
+#define GLX_PAYLOAD_BUF 512
 _Static_assert(GLX_PAYLOAD_BUF > GLX_PACKET_MAX_BYTES,
                "payload buffer must hold a full packet's worth of codewords");
 
@@ -87,25 +49,11 @@ int main(int argc, char **argv)
         return 1;
     }
 
-    const char *in_path  = argv[1];
+    const char *inputpath  = argv[1];
     int bits = atoi(argv[2]);
     int alpha_idx = atoi(argv[3]);
     uint32_t seed = (uint32_t)strtoul(argv[4], NULL, 10);
     const char *out_path = argv[5];
-    /* Input rate. 48 kHz is the default and the historical behaviour. 16 kHz
-     * feeds the pipeline directly and skips the resampler entirely -- the same
-     * path the bench harness takes with GLX_BENCH_RESAMPLE=0, so a bitrate
-     * measured here is comparable to the one it reports. Passing already-16 kHz
-     * audio as 48 kHz would force an upsample first, and that round trip
-     * low-pass filters the signal and understates the real bitrate. */
-    int in_rate = (argc == 7) ? atoi(argv[6]) : (int)GLX_IN_RATE;
-    if (in_rate != (int)GLX_IN_RATE && in_rate != (int)GLX_OUT_RATE) {
-        fprintf(stderr, "in_rate must be %d or %d\n",
-                (int)GLX_IN_RATE, (int)GLX_OUT_RATE);
-        return 1;
-    }
-    /* 1 = passthrough, GLX_DECIMATION = anti-alias + decimate. */
-    const size_t decim = (in_rate == (int)GLX_OUT_RATE) ? 1u : (size_t)GLX_DECIMATION;
     /* Input rate. 48 kHz is the default and the historical behaviour. 16 kHz
      * feeds the pipeline directly and skips the resampler entirely -- the same
      * path the bench harness takes with GLX_BENCH_RESAMPLE=0, so a bitrate
@@ -139,20 +87,20 @@ int main(int argc, char **argv)
     /* ── size the input ─────────────────────────────────────────────── */
     /* Only the LENGTH is read up front, to fill in numSamples before the CRC
      * starts; the samples themselves are pulled a packet at a time below. */
-    FILE * fin = fopen(in_path, "rb"); //read finle input
+    FILE * fin = fopen(inputpath, "rb"); //read finle input
     if (fin == NULL)
     {
-        perror(in_path); return 1;
+        perror(inputpath); return 1;
     }
 
     if (fseek(fin, 0, SEEK_END) != 0) {
-        fprintf(stderr, "%s: not a seekable file\n", in_path);
+        fprintf(stderr, "%s: not a seekable file\n", inputpath);
         fclose(fin); return 1;
     }
     long totalbytes = ftell(fin); //implement redundancy in case overflow? //3 hours of stereo should be fine tbh
     if (fseek(fin, 0, SEEK_SET) != 0 || totalbytes < 0)
     {
-        fprintf(stderr, "Cannot size %s\n", in_path);
+        fprintf(stderr, "Cannot size %s\n", inputpath);
         fclose(fin);
         return 1;
     }
@@ -240,16 +188,12 @@ int main(int argc, char **argv)
 
         size_t got = fread(in48, sizeof(int16_t), want, fin);
         if (got != want) {
-            fprintf(stderr, "short read on %s\n", in_path);
+            fprintf(stderr, "short read on %s\n", inputpath);
             failed = 1;
             break;
         }
         consumed += got;
 
-        /* anti-alias + decimate this packet: 480 in -> up to 160 out. At
-         * decim == 1 the input is already at the codec rate, so the resampler
-         * is bypassed rather than run with a factor of 1 -- running it would
-         * still apply the anti-alias FIR and needlessly band-limit the signal. */
         /* anti-alias + decimate this packet: 480 in -> up to 160 out. At
          * decim == 1 the input is already at the codec rate, so the resampler
          * is bypassed rather than run with a factor of 1 -- running it would
@@ -328,12 +272,6 @@ int main(int argc, char **argv)
     }
     if (fclose(fout) != 0) { perror(out_path); remove(out_path); return 1; }
 
-    if (decim == 1u)
-        fprintf(stderr, "%zu @16kHz (resampler bypassed); encoded -> %zu payload bytes (%zu total)\n",
-                n, plen, sizeof(h) + plen);
-    else
-        fprintf(stderr, "resampled %zu @48kHz -> %zu @16kHz; encoded -> %zu payload bytes (%zu total)\n",
-                numinputs, n, plen, sizeof(h) + plen);
     if (decim == 1u)
         fprintf(stderr, "%zu @16kHz (resampler bypassed); encoded -> %zu payload bytes (%zu total)\n",
                 n, plen, sizeof(h) + plen);

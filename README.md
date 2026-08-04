@@ -6,8 +6,15 @@ A minimal, integer-only, per-sample speech codec built for the low-bit ASR evalu
 
 ```sh
 make            # build glx_encode and glx_decode
-make tables     # generate look-up tables such as compression_lut.h, resample_taps.h, huffman_lut.h
+make tables     # regenerate the lookup tables in src/generated/
 make clean
+```
+
+```
+src/            codec library + the two CLI entry points
+src/generated/  tables baked by tools/ -- do not edit by hand
+tools/          Python table generators and their input data
+tests/          pytest suite (builds the C sources directly)
 ```
 
 The C binaries are libm-free (`-O2 -Wall -Wextra -std=c11`). Only the Python table generators use
@@ -181,7 +188,7 @@ ffmpeg -f s16le -ar 16000 -ac 1 -i out.pcm out.wav
 
 ## Container format
 
-18 bytes, packed, little-endian ([glx.h](glx.h)), followed by the Huffman payload:
+18 bytes, packed, little-endian ([glx.h](src/glx.h)), followed by the Huffman payload:
 
 | Offset | Size | Field | Notes |
 |---|---|---|---|
@@ -203,7 +210,7 @@ a file whose CRC does not match rather than emitting garbage.
 ## Measured bitrate
 
 Average codeword length computed from the residual PMFs in
-[huffman_tables_10.csv](huffman_tables_10.csv), at 16 kHz:
+[huffman_tables_10.csv](tools/huffman_tables_10.csv), at 16 kHz:
 
 | bits | α = 0.0 | α = 0.5 | α = 1.0 | raw PCM at this depth |
 |---|---|---|---|---|
@@ -243,7 +250,7 @@ still clamps as a backstop.
 about 0 for every α — α spreads probability mass outward but never reorders it. Huffman code
 *length* depends on probability rank, not exact value, so the length allocation is α-invariant;
 this was checked empirically against all 11 alphas in `huffman_tables_10.csv`. The table baked in
-is the α=0.5 one. See the header comment in [gen_huffman_lut.py](gen_huffman_lut.py) for the full
+is the α=0.5 one. See the header comment in [gen_huffman_lut.py](tools/gen_huffman_lut.py) for the full
 argument. (That CSV is not shipped in this repository, so the empirical check cannot be re-run
 here; `huffman_lut.h` carries the resulting codes and lengths, not the probabilities they came
 from.)
@@ -277,33 +284,19 @@ stream.
 
 | File | Role |
 |---|---|
-| [encoder.c](encoder.c) / [decoder.c](decoder.c) | CLI entry points; the per-sample loops |
-| [glx.h](glx.h) | shared constants, α table, container header |
-| [resample.c](resample.c) | anti-alias FIR + decimation (factor 3 and 6) |
-| [compression.c](compression.c) | forward µ-law companding via half-LUT |
-| [dither.c](dither.c) | xorshift32 PRNG, gated zero-mean subtractive dither |
-| [quantizer.c](quantizer.c) | headroom prescale, mid-riser quantize/dequantize |
-| [residual.c](residual.c) | first-order predictor |
-| [huffman.c](huffman.c) | static Huffman encode/decode |
-| [bitstream.c](bitstream.c) | MSB-first bit packer/unpacker |
-| [crc.c](crc.c) | table-driven CRC-32 |
-| [glx_bench.c](glx_bench.c) | `codec_iface.h` wrapper for the in-memory benchmark harness |
-| `compression_lut.h`, `huffman_lut.h`, `resample_taps.h` | **generated** — do not edit; run `make tables` |
-| `gen_*.py` | table generators (the only floating-point code here) |
-
-### Benchmark wrapper
-
-[glx_bench.c](glx_bench.c) exposes the same pipeline through
-[`codec_iface.h`](../codec_iface.h), driven in memory rather than through files, so GLX plugs into
-the shared sweep harness alongside the other codecs. It defaults to **16 kHz input with the
-resampler gated off** (`GLX_BENCH_RESAMPLE=0`), on the assumption that audio is captured at the
-rate the codec works at and no one should be charged for resampling. Build with
-`-DGLX_BENCH_RESAMPLE=1` to take 48 kHz input and pay that cost inline. Operating points are
-declared at the bottom of the file via the `GLX_CODEC` macro; the sweep currently wires α ∈
-{0.0, 0.8, 1.0} × bits ∈ {1, 2, 3}.
-
-Note that the descriptor `slot` suffix and the `alpha_idx` are deliberately decoupled, so that
-expanding the CSV to 11 alphas did not silently repoint slot 1/2 at α=0.1/0.2.
+| [encoder.c](src/encoder.c) / [decoder.c](src/decoder.c) | CLI entry points; the per-sample loops |
+| [glx.h](src/glx.h) | shared constants, α table, container header |
+| [resample.c](src/resample.c) | anti-alias FIR + decimation (factor 3 and 6) |
+| [compression.c](src/compression.c) | forward µ-law companding via half-LUT |
+| [dither.c](src/dither.c) | xorshift32 PRNG, gated zero-mean subtractive dither |
+| [quantizer.c](src/quantizer.c) | headroom prescale, mid-riser quantize/dequantize |
+| [residual.c](src/residual.c) | first-order predictor |
+| [huffman.c](src/huffman.c) | static Huffman encode/decode |
+| [bitstream.c](src/bitstream.c) | MSB-first bit packer/unpacker |
+| [crc.c](src/crc.c) | table-driven CRC-32 |
+| `src/generated/*.h` | **generated** — do not edit; run `make tables` |
+| `tools/gen_*.py` | table generators (the only floating-point code here) |
+| `tools/huffman_tables_10.csv` | residual PMF data feeding `gen_huffman_lut.py` |
 
 ## Known limitations
 

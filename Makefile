@@ -1,45 +1,62 @@
 # Makefile -- build the GLX encoder and decoder.
 #
 #   make            build glx_encode and glx_decode
-#   make tables     regenerate compression_lut.h, resample_taps.h, huffman_lut.h
+#   make tables     regenerate the lookup tables in src/generated/
 #   make clean      remove binaries and object files
+#
+# Layout:
+#   src/            codec library + the two CLI entry points
+#   src/generated/  tables baked by tools/ -- do not edit by hand
+#   tools/          Python table generators (the only floating-point code here)
 #
 # The C binaries are libm-free; only the Python generators use math.
 
-CC      ?= cc
-CFLAGS  ?= -O2 -Wall -Wextra -std=c11
-PYTHON  ?= python3
+CC       ?= cc
+CFLAGS   ?= -O2 -Wall -Wextra -std=c11
+CPPFLAGS ?= -Isrc -Isrc/generated
+PYTHON   ?= python3
 
-# Shared codec components (one translation unit per pipeline stage).
-COMPONENTS = resample.c compression.c dither.c quantizer.c residual.c bitstream.c huffman.c crc.c
+SRCDIR = src
+GENDIR = $(SRCDIR)/generated
+TOOLS  = tools
+
+# The two translation units carrying main(); everything else in src/ is library.
+MAINS      = $(SRCDIR)/encoder.c $(SRCDIR)/decoder.c
+COMPONENTS = $(filter-out $(MAINS),$(wildcard $(SRCDIR)/*.c))
 
 # Generated headers the components depend on.
-GENERATED  = compression_lut.h resample_taps.h huffman_lut.h crc_lut.h
+GENERATED = $(GENDIR)/compression_lut.h $(GENDIR)/resample_taps.h \
+            $(GENDIR)/huffman_lut.h     $(GENDIR)/crc_lut.h
 
 all: glx_encode glx_decode
 
-glx_encode: encoder.c $(COMPONENTS) $(GENERATED)
-	$(CC) $(CFLAGS) -o $@ encoder.c $(COMPONENTS)
+glx_encode: $(SRCDIR)/encoder.c $(COMPONENTS) $(GENERATED)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRCDIR)/encoder.c $(COMPONENTS)
 
-glx_decode: decoder.c $(COMPONENTS) $(GENERATED)
-	$(CC) $(CFLAGS) -o $@ decoder.c $(COMPONENTS)
+glx_decode: $(SRCDIR)/decoder.c $(COMPONENTS) $(GENERATED)
+	$(CC) $(CFLAGS) $(CPPFLAGS) -o $@ $(SRCDIR)/decoder.c $(COMPONENTS)
 
-# Regenerate the fixed lookup tables from their sources.
-tables: compression_lut.h resample_taps.h huffman_lut.h crc_lut.h
+# Regenerate the fixed lookup tables from their sources. Each generator writes
+# into src/generated/ relative to its own location.
+tables: $(GENERATED)
 
-compression_lut.h: gen_compression_lut.py
-	$(PYTHON) gen_compression_lut.py
+$(GENDIR)/compression_lut.h: $(TOOLS)/gen_compression_lut.py | $(GENDIR)
+	$(PYTHON) $<
 
-crc_lut.h: gen_crc_lut.py
-	$(PYTHON) gen_crc_lut.py
+$(GENDIR)/crc_lut.h: $(TOOLS)/gen_crc_lut.py | $(GENDIR)
+	$(PYTHON) $<
 
-resample_taps.h: gen_resample_taps.py
-	$(PYTHON) gen_resample_taps.py
+$(GENDIR)/resample_taps.h: $(TOOLS)/gen_resample_taps.py | $(GENDIR)
+	$(PYTHON) $<
 
-huffman_lut.h: gen_huffman_lut.py huffman_tables_10.csv
-	$(PYTHON) gen_huffman_lut.py
+$(GENDIR)/huffman_lut.h: $(TOOLS)/gen_huffman_lut.py $(TOOLS)/huffman_tables_10.csv | $(GENDIR)
+	$(PYTHON) $<
+
+# Order-only: the directory must exist, but its mtime must not trigger rebuilds.
+$(GENDIR):
+	mkdir -p $@
 
 clean:
-	rm -f glx_encode glx_decode *.o
+	rm -f glx_encode glx_decode glx_encode.exe glx_decode.exe $(SRCDIR)/*.o
 
 .PHONY: all tables clean
