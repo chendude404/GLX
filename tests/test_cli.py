@@ -212,7 +212,9 @@ def test_missing_input_file_is_reported(cli, tmp_path):
     assert proc.returncode != 0
 
 
-@pytest.mark.parametrize("argv", [[], ["a"], ["a", "b"], ["a", "b", "c", "d", "e", "f"]])
+# argc 7 (5 args + optional in_rate) is now a VALID arity, so the too-many
+# case must use 7 args -> argc 8.
+@pytest.mark.parametrize("argv", [[], ["a"], ["a", "b"], ["a", "b", "c", "d", "e", "f", "g"]])
 def test_wrong_argument_count_prints_usage(cli, argv):
     proc = subprocess.run([str(cli[0])] + argv, capture_output=True, text=True)
     assert proc.returncode != 0
