@@ -11,16 +11,24 @@ make clean
 ```
 
 The C binaries are libm-free (`-O2 -Wall -Wextra -std=c11`). Only the Python table generators use
-`math`, and their output is checked in, so `make tables` is only needed if you change a generator
-or `huffman_tables_10.csv`.
+`math`, and every generated header is checked in, so a plain `make` never needs Python.
 
+`make tables` regenerates them. Note that `huffman_tables_10.csv` — the residual PMF data that
+`gen_huffman_lut.py` reads — is **not** included in this repository, so `huffman_lut.h` cannot be
+regenerated here. The checked-in header is complete and self-contained; only regeneration and the
+bitrate table below depend on the CSV.
 
 ## Usage
 
 ```sh
-./glx_encode in.pcm bits alpha_idx seed out.glx
+./glx_encode in.pcm bits alpha_idx seed out.glx [in_rate]
 ./glx_decode in.glx out.pcm
 ```
+
+`in_rate` is optional: `48000` (default — anti-alias filter then decimate to 16 kHz) or `16000`
+(input is already at the codec rate, resampler bypassed entirely). The bypass matters for
+measurement: feeding already-16 kHz audio through the 48 kHz path requires upsampling it first,
+and that round trip band-limits the signal and understates the true bitrate.
 
 ## Pipeline
 
@@ -34,16 +42,23 @@ Decoder:  header -> verify CRC-32 -> Huffman decode -> reconstruct code
 ```
 
 The dither is **subtractive**: the encoder adds a pseudo-random value, the decoder regenerates
-the identical value from the shared seed and subtracts it. Both sides run the same Galois LFSR
-in lockstep, so it cancels exactly in the round trip.
+the identical value from the shared seed and subtracts it. Both sides run the same xorshift32
+generator in lockstep, so it cancels exactly in the round trip.
 
 The reference pipeline is written out as below. 
 
 # GLX Codec Implementation Design
 
-The GLX codec is strictly implemented using fixed-point arithmetic. This deliberate design eliminates the need for Floating Point Operations (FLOPs) and dedicated hardware. 
+The GLX codec is strictly implemented using fixed-point arithmetic. This deliberate design eliminates the need for Floating Point Operations (FLOPs) and dedicated hardware. The two priorities throughout were **minimizing bitrate and minimizing compute**.
 
 We support 1-, 2-, and 3-bit quantization to meet strict low-resolution constraints. The pipeline consists of five stages: Sampling, Logarithmic Compression, Dither, Coding, and Formatting.
+
+**Why 3 bits is the design centre.** The depth was chosen partly for the compute restrictions, but
+mainly to hold bitrate and transmission cost down. It is bounded on both sides: below this range,
+parametric coding begins to overtake waveform coding in efficacy, which removes the whole point of
+a waveform codec; above it, the bitrate savings that motivate the design stop justifying the
+distortion budget. 3-bit quantization would normally introduce harsh, signal-dependent distortion —
+subtractive dither is what makes it usable.
 
 ## Sampling
 
@@ -53,7 +68,11 @@ To avoid computational overhead during decimation from a 48 kHz input, we simply
 
 ## Logarithmic Compression
 
-Our compression relies on a $\mu$-law inspired continuous remapping function, where $\mu \ge 0$ controls the compression degree:
+µ-law companding remains one of the most effective methods for redistributing the
+Signal-to-Quantization-Noise Ratio (SQNR) in speech applications (Smith, 1957). We adopt the
+$\mu = 255$ law of **ITU-T G.711** (ITU-T, 1988) — the same companding law used by the narrowband
+telephony codecs GLX is benchmarked against — a continuous remapping function where $\mu \ge 0$
+controls the compression degree:
 
 ```math
 F(x) = \mathrm{sgn}(x)\,\frac{\ln\left(1 + \mu|x|\right)}{\ln\left(1 + \mu\right)}, \qquad |x| \le 1
@@ -65,15 +84,48 @@ Instead, we chose to approximate the function by storing only 129 values spaced 
 
 ## Dither
 
-We generate subtractive dither using a 32-bit Galois Linear Feedback Shift Register (LFSR). This pseudo-random number generator is highly efficient, requiring just one bitshift and three XOR operations per value.
+We generate subtractive dither using a 32-bit **xorshift32** generator (shift triple 13/17/5). It is highly efficient — three shifts and three XORs per value, no table, no multiply, no float. Dither theory assumes perfectly random noise; a deterministic generator is widely accepted in practice given the difficulty of obtaining true randomness (Pamarti, 2007), and subtractive dither *requires* a generator the decoder can replay exactly, which a true random source cannot provide.
 
-The shared state seed is transmitted in the `.glx` header, allowing perfect noise reconstruction at the decoder. By drawing twice per sample, we ensure up to 37 hours of non-repeating dither.
+Xorshift32 has a full period of $2^{32}-1$ over the nonzero states — the same as a maximal LFSR — with 0 as a fixed point, hence the nonzero-seed requirement. The shared state seed is transmitted in the `.glx` header, allowing perfect noise reconstruction at the decoder. Two draws are taken per sample, giving up to 37 hours of non-repeating dither.
 
-To prevent quantizer overload, we prescale each companded sample by $h = \frac{1}{1 + \Delta}$. This shrinks the signal so the combined signal and dither stay safely within the int16 range without clipping.
+### Why xorshift32 and not an LFSR
+
+This originally used a Galois LFSR, and the change was a correctness fix rather than an
+optimization.
+
+An LFSR advances **one bit per step**, so consecutive states share 31 of their 32 bits. The dither
+needs two draws per sample — one for the gate, one for the amplitude — and taking them from
+consecutive LFSR states made the amplitude a near-deterministic function of the gate draw.
+Conditioning on "the gate fired" then meant conditioning on a *small* gate draw, which dragged the
+amplitude draw small as well. The measured mean amplitude among firing draws was about **−8000 out
+of a ±32768 range at α = 0.5** — a systematically one-sided dither, which destroys the zero-mean
+property the whole subtractive scheme depends on.
+
+Xorshift32 mixes the entire word every step, so the two draws are usable as independent.
+
+To prevent quantizer overload, we prescale each companded sample by $h = \frac{1}{1 + \Delta}$, where $\Delta = \text{step}/2^{15}$ is the quantizer step normalized to full scale. This shrinks the signal so the combined signal and dither stay safely within the int16 range without clipping.
+
+### Why the decoder does not expand
+
+Neither the headroom factor nor the µ-law compression is inverted at the decoder. This is
+deliberate, not an omission.
+
+The requirement at this stage is **error statistics, not perceptual transparency**. The headroom is
+a constant gain, so undoing it buys nothing and costs compute. µ-law, however, is a *non-linear*
+process: expanding it would destroy the statistical properties of the dithered signal. Keeping the
+signal in the companded domain preserves the assumption of uniform quantization error $\epsilon$
+that subtractive dither theory depends on — inverting the companding would violate it.
+
+The practical consequence is that decoder output is the companded-domain signal, so it is not
+directly comparable to the input waveform and SNR against the source is meaningless without
+applying an expand externally. That is a property of the design, not a defect in it.
 
 ## Coding
 
-We encode the first-order residual, $r_n$, which exhibits a Laplace-like distribution:
+Successive speech samples remain highly correlated — first-order intersample correlation ≈ 0.9 —
+so coding the residual is a cheap transform that reduces the signal's dynamic range and increases
+compressibility (Hasegawa-Johnson, 2003). We encode the first-order residual, $r_n$, which exhibits
+a Laplace-like distribution:
 
 ```math
 r_n = \begin{cases}
@@ -82,9 +134,12 @@ r_n = \begin{cases}
 \end{cases}
 ```
 
-We specifically chose Huffman coding over advanced table-based coders like Asymmetric Numeral Systems (tANS). While tANS offers superior theoretical compression, Huffman coding provides a far better balance of low implementation complexity and linear execution time. 
+We specifically chose Huffman coding over advanced table-based coders like Asymmetric Numeral Systems (tANS). While tANS offers superior theoretical compression, Huffman coding provides a far better balance of low implementation complexity and linear execution time. A precomputed codebook also means neither side transmits or reconstructs a codebook at runtime — only `bits` and `alphaIdx` ride in the header, two bytes total, and those select the decode rather than describing the table.
 
-We precomputed 33 static codebooks tailored to different bit-depths and $ lpha$ parameters to match varying source distributions. These require only 9 to 45 bytes of storage, completely bypassing the 16 kB overhead required by a typical tANS table.
+We ship **three static codebooks, one per bit depth** — 3, 7, and 15 symbols for 1-, 2- and 3-bit
+respectively, together 9 to 45 bytes of storage, against the ~16 kB a typical tANS table would
+need. There is deliberately **no α dimension**; see *One Huffman table per bit depth* under Design
+notes for why one table is optimal for every α rather than an approximation of it.
 
 ## Formatting (GLX)
 
@@ -92,13 +147,25 @@ The `.glx` format encapsulates the data in an uninterrupted Huffman code stream.
 
 We explicitly restricted the CRC to the header rather than applying it to the payload. This ensures critical decoding metadata is received correctly while aggressively minimizing the overall transmission bitrate.
 
+## Parametric dither: the design's central trade-off
+
+α is not a tuning nicety — it is the parameter the codec exists to explore.
+
+Standard dithering whitens the noise, which decorrelates the signal but *reduces* the effectiveness
+of compression. By parameterizing the amplitude and shape of the dither, the encoder can be tuned
+between two competing goals: enough signal decorrelation to maintain ASR performance, and low
+enough residual entropy to keep the transmitted stream compressible (Murray, 2026).
+
+The bitrate table below quantifies one side of that trade — dither costs 40–50% more bits at every
+depth. The WER measurements quantify the other. Any α-vs-WER result has to be read against both.
 
 | Argument | Range | Meaning |
 |---|---|---|
-| `in.pcm` | — | raw **headerless signed 16-bit little-endian mono PCM at 48 kHz** |
+| `in.pcm` | — | raw **headerless signed 16-bit little-endian mono PCM** at the rate given by `in_rate` |
 | `bits` | 1..3 | quantizer depth |
 | `alpha_idx` | 0..10 | dither amplitude, α = `alpha_idx`/10 |
-| `seed` | nonzero u32 | dither LFSR seed; stored in the header so the decoder replays it |
+| `seed` | nonzero u32 | dither PRNG seed; stored in the header so the decoder replays it |
+| `in_rate` | 48000 or 16000 | optional, default 48000. 16000 bypasses the resampler entirely |
 
 `alpha_idx` and `seed` are recorded in the container, so `glx_decode` needs no arguments beyond
 the file. Output PCM is **16 kHz**, s16le mono.
@@ -122,7 +189,7 @@ ffmpeg -f s16le -ar 16000 -ac 1 -i out.pcm out.wav
 | 4 | 4 | `numSamples` | count of **16 kHz** samples, i.e. post-decimation |
 | 8 | 1 | `bits` | 1..3 |
 | 9 | 1 | `alphaIdx` | index into `GLX_ALPHA_Q16_TABLE` |
-| 10 | 4 | `seed` | dither LFSR seed |
+| 10 | 4 | `seed` | dither xorshift32 seed (nonzero) |
 | 14 | 4 | `crc32` | CRC-32 over `numSamples..seed` + payload |
 
 The header carries **only what is needed to reproduce a decode** — never the tables themselves.
@@ -175,14 +242,36 @@ still clamps as a backstop.
 **One Huffman table per bit depth, not per alpha.** The residual PMF is unimodal and symmetric
 about 0 for every α — α spreads probability mass outward but never reorders it. Huffman code
 *length* depends on probability rank, not exact value, so the length allocation is α-invariant;
-this was checked empirically against all 11 alphas in the CSV. The table baked in is the α=0.5
-one. See the header comment in [gen_huffman_lut.py](gen_huffman_lut.py) for the full argument.
+this was checked empirically against all 11 alphas in `huffman_tables_10.csv`. The table baked in
+is the α=0.5 one. See the header comment in [gen_huffman_lut.py](gen_huffman_lut.py) for the full
+argument. (That CSV is not shipped in this repository, so the empirical check cannot be re-run
+here; `huffman_lut.h` carries the resulting codes and lengths, not the probabilities they came
+from.)
 
-**Two-stage gated dither.** `glx_dither_next` draws once for a Bernoulli(α) gate and, only if the
-gate fires, a second time for a zero-mean uniform amplitude of width α·Δ. So the LFSR advances
-one step on a miss and two on a hit. That is deterministic from the state, which is the only
-reason encoder and decoder stay synchronized — any divergence in the branch desynchronizes the
-entire remainder of the stream.
+**Two-stage gated dither.** `glx_dither_next` draws twice — once for a Bernoulli(α) gate, once for
+a zero-mean uniform amplitude of width α·Δ. Three properties make the distribution correct, and
+each is load-bearing:
+
+1. **Fixed consumption.** Both draws are taken on *every* call, whether the gate fires or not. An
+   earlier version took one draw on a miss and two on a hit; that resampled the generator at
+   data-dependent positions and let the realised fire rate drift away from α even though the
+   marginal probability was right.
+2. **Symmetric amplitude set.** `g` is drawn from the *odd* integers in [−65535, +65535], so every
+   value is paired with its exact negative and E[g] = 0 identically. The natural-looking
+   `(draw >> 16) - 32768` spans [−32768, +32767] — one value longer on the negative side, worth
+   half an LSB of DC offset.
+3. **Truncation, not arithmetic shift.** Scaling `g` down uses integer division, which truncates
+   toward zero and is therefore an odd function. A `>>` would floor, rounding every negative value
+   away from zero and reintroducing about −0.5 LSB of bias on exactly the symmetric quantity built
+   in (2).
+
+The gate is *exactly* Bernoulli(α), with no rounding at either endpoint: since
+65535 × 65537 = 2³²−1 and xorshift32 never emits 0, the threshold `alpha_q16 * 65537` gives
+P(fire) = α precisely, with α=0 never firing and α=1 always firing.
+
+All of this is deterministic from the state, which is the only reason encoder and decoder stay
+synchronized — any divergence in draw count or branch desynchronizes the entire remainder of the
+stream.
 
 ## File map
 
@@ -192,7 +281,7 @@ entire remainder of the stream.
 | [glx.h](glx.h) | shared constants, α table, container header |
 | [resample.c](resample.c) | anti-alias FIR + decimation (factor 3 and 6) |
 | [compression.c](compression.c) | forward µ-law companding via half-LUT |
-| [dither.c](dither.c) | Galois LFSR, gated zero-mean subtractive dither |
+| [dither.c](dither.c) | xorshift32 PRNG, gated zero-mean subtractive dither |
 | [quantizer.c](quantizer.c) | headroom prescale, mid-riser quantize/dequantize |
 | [residual.c](residual.c) | first-order predictor |
 | [huffman.c](huffman.c) | static Huffman encode/decode |
@@ -221,14 +310,12 @@ expanding the CSV to 11 alphas did not silently repoint slot 1/2 at α=0.1/0.2.
 These are consequences of following [pseudocode.txt](pseudocode.txt) literally, not accidents,
 but they will surprise you if you are not expecting them:
 
-- **The decoder does not expand.** There is no inverse µ-law step, so decoder output is the
-  *companded-domain* signal, not the original linear waveform. It is not directly comparable to
-  the input, and SNR against the source is meaningless without applying an expand externally.
 - **The decoder does not upsample.** Output is 16 kHz; the 48→16 kHz decimation is one-way.
 - **Round-trip error is large by design at low depths.** Dither cancels exactly; quantization
   error does not. At 2 bits there are 4 bins of width 16384.
-- **No sample-rate validation.** The encoder assumes its input is 48 kHz and cannot tell if it
-  is not. Feeding it 16 kHz PCM produces a valid-looking file containing garbage.
+- **No sample-rate validation.** `in_rate` lets you *declare* the input rate, but the encoder
+  cannot *detect* it. Declaring 48000 for 16 kHz audio — or the reverse — produces a
+  valid-looking file containing garbage.
 - **Group delay is not compensated.** The 31-tap FIR contributes 15 input samples (~312 µs) of
   delay, and the delay line starts zero-filled, so the first few output samples are filter
   warm-up. Irrelevant for ASR, fatal for sample-aligned SNR measurement.
@@ -236,6 +323,14 @@ but they will surprise you if you are not expecting them:
 - **`glx_huffman_decode` linear-scans the symbol table for every bit consumed** (up to 15 symbols
   × 14 bits per sample). Correct, but it is the obvious hot spot if decode throughput ever
   matters.
-- **The resampler shifts its whole 31-entry delay line per input sample**, ~1.4M copies per
-  second of audio. A circular buffer would make insertion O(1); the literal shift was kept for
-  readability against the pseudocode.
+- **The decoder is not packetized.** `glx_decode` mallocs the entire payload and the entire output
+  buffer up front, both scaling with file length — the whole-file pattern the encoder was
+  rewritten to eliminate. Fine on a host, not on the RISC-V target.
+
+## References
+
+- Smith, B. (1957). Instantaneous companding of quantized signals. *Bell System Technical Journal*.
+- ITU-T (1988). Recommendation G.711: Pulse code modulation (PCM) of voice frequencies.
+- Pamarti, S. (2007). On the use of deterministic PRNGs as dither generators.
+- Hasegawa-Johnson, M. (2003). Speech coding and intersample correlation.
+- Murray et al. (2026). Parametric dither for low-bitrate ASR front ends.
