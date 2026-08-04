@@ -66,10 +66,10 @@ void glx_resample_init_factor(GlxResampler *rs, int factor)
     rs->phase = 0;
     rs->widx  = 0;
 
-    /* Each factor needs the tap set cut off at ITS decimated Nyquist. This letss us compare G711 vs GLX, probably should be removed for standalone*/
+    /* Each factor needs the tap set cut off at ITS decimated Nyquist. */
     switch (factor) {
-    case 6:  rs->factor = 6; rs->taps = glx_resample_taps_f6; break; //G711 benchmark: IGNORE
-    case 3:  rs->factor = 3; rs->taps = glx_resample_taps_f3; break; //GLX stanard
+    case 6:  rs->factor = 6; rs->taps = glx_resample_taps_f6; break;
+    case 3:  rs->factor = 3; rs->taps = glx_resample_taps_f3; break;
     default: rs->factor = (uint8_t)GLX_RESAMPLE_FACTOR;
              rs->taps   = glx_resample_taps_f3;
              break;
