@@ -272,9 +272,6 @@ stream.
 
 ## Known limitations
 
-These are consequences of following [pseudocode.txt](pseudocode.txt) literally, not accidents,
-but they will surprise you if you are not expecting them:
-
 - **The decoder does not upsample.** Output is 16 kHz; the 48→16 kHz decimation is one-way.
 - **Round-trip error is large by design at low depths.** Dither cancels exactly; quantization
   error does not. At 2 bits there are 4 bins of width 16384.
