@@ -1,4 +1,4 @@
-# GLX
+# Granulated Low-bitrate Mixture (GLX)
 
 A minimal, integer-only, per-sample speech codec built for low-bit ASR evaluation.
 
